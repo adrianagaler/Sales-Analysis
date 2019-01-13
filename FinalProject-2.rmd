@@ -1,0 +1,560 @@
+---
+title: 'Stat139 Project '
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+
+Tasks to do:
+
+
+```{r, results= F}
+#install.packages("tidyverse")
+#install.packages("glmnet")
+#install.packages("MASS")
+#install.packages("kableExtra")
+#install.packages("Hmisc")
+#install.packages("caret")
+library(tidyverse)
+```
+
+```{r}
+library("knitr")
+library(kableExtra)
+
+variables<-c("Item_Identifier","Item_Weight", "Item_Fat_Content", "Item_Visibility", "Item_Type", "Item_MRP","Outlet_Identifier","Outlet_Establishment_Year","Outlet_Size","Outlet_Location_Type","Outlet_Type","Item_Outlet_Sales")
+description<-c("Unique product ID","Weight of product","Whether the product is low fat or not","The % of total display area of all products in a store allocated to the particular product","The category to which the product belongs","
+Maximum Retail Price (list price) of the product","Unique store ID","The year in which store was established","The size of the store in terms of ground area covered","The type of city in which the store is located","Whether the outlet is just a grocery store or some sort of supermarket","Sales of the product in the particular store. This is the outcome variable to be predicted.")
+
+tabl<-cbind(variables,description)
+kable(tabl, align='c',col.names=c("Variables","Description"),booktabs=T,caption = "Predictor Variables")%>%
+  kable_styling(latex_options =c("striped","hold_position","scale_down"),font_size = 12, full_width = F)%>%
+  column_spec(c(1,2), color = "black")
+```
+
+
+
+
+
+Let's import the dataset
+```{r}
+mydata <- read.csv("~/Train.csv")
+```
+
+
+```{r}
+library(Hmisc)
+Hmisc::describe(mydata)
+```
+
+
+```{r}
+glimpse(mydata)
+summary(mydata)
+levels(mydata$Item_Type)
+```
+
+```{r}
+#Some data processing here
+# Fixing fat category
+# Note that Fat Category has "LF", "low fat", "Low Fat" all meaning the same category
+mydata$Item_Fat_Content = gsub("low fat", "Low Fat", mydata$Item_Fat_Content)
+mydata$Item_Fat_Content = gsub("LF", "Low Fat", mydata$Item_Fat_Content)
+mydata$Item_Fat_Content = gsub("reg", "Regular", mydata$Item_Fat_Content)
+# Fixing Item Idenfier Category
+# only the first 2 letter important (Food, Drink, Non-Consumable)
+mydata$Item_Cat2 <- substr(mydata$Item_Identifier, 1 , 2)
+# fixing fat category for Non-Consumable
+mydata$Item_Fat_Content[mydata$Item_Cat2 == "NC"] <- "not_food"
+mydata$Item_Fat_Content = as.factor(mydata$Item_Fat_Content)
+#data collected in 2016
+mydata$Outlet_Age = 2016 - mydata$Outlet_Establishment_Year
+```
+
+
+```{r}
+# Note, checking for missing data we see 1463 points are missing in Item_weight
+table(is.na(mydata))
+colSums(is.na(mydata))
+# Note all missing weights are from Out19 and Out27, they have exactly
+mydata$Outlet_Identifier = as.factor(mydata$Outlet_Identifier)
+plot(mydata$Item_Weight ~ mydata$Outlet_Identifier, col = "pink")
+mydata$Outlet_Identifier = as.character(mydata$Outlet_Identifier)
+sum(mydata$Outlet_Identifier =="OUT019") + sum(mydata$Outlet_Identifier =="OUT027")
+sum(is.na(mydata$Item_Weight[mydata$Outlet_Identifier =="OUT019"])) + sum(is.na(mydata$Item_Weight[mydata$Outlet_Identifier =="OUT027"]))
+# So we can get their weight by replacing it with the average weight of the same intems in the other outlets.
+mydata = mydata %>% 
+  group_by(Item_Identifier) %>% 
+  mutate(Item_Weight = ifelse(is.na(Item_Weight), mean(Item_Weight, na.rm = TRUE), Item_Weight))
+# Only 4 items don't have a weight so we remove them, and adding a new columns sales = total sales/MRP
+mydata = mydata %>%
+  filter(!is.na(Item_Weight)) %>%
+  mutate(sales_vol = Item_Outlet_Sales/Item_MRP)
+# Adding back the factors
+mydata$Outlet_Identifier = as.factor(mydata$Outlet_Identifier)
+mydata$Item_Cat2 = as.factor(mydata$Item_Cat2)
+```
+
+
+
+
+```{r}
+# Some EDA (histogram/qqnorm)
+par(mfrow = c(1,2))
+hist((mydata$Item_Outlet_Sales), col = "pink", xlab = "OutletSales", main = "OutletSales")
+hist((mydata$Item_Outlet_Sales)^{1/3}, col = "pink", xlab = "OutletSales^1/3", main = "OutletSales to 1/3")
+qqnorm(mydata$Item_Outlet_Sales)
+qqnorm(mydata$Item_Outlet_Sales^{1/3})
+hist(mydata$sales_vol, col = "pink", main = "sales_vol")
+hist(mydata$sales_vol^{1/2}, col = "pink", main = "sqrt  of sales_vol" )
+hist(mydata$Item_MRP, col = "pink")
+# Need to split MRP in 4 categories, Low, Mid, High, VHigh.
+qqnorm(mydata$Item_MRP)
+# adding transformed data to mydata
+mydata$Item_Outlet_Sales3 = mydata$Item_Outlet_Sales^{1/3}
+```
+
+```{r}
+attach(mydata)
+```
+
+
+```{r}
+model0 = lm(Item_Outlet_Sales3~1)
+summary(model0)
+# simple model R2 = 0.3
+model1 = lm(Item_Outlet_Sales3 ~ Item_MRP)
+summary(model1)
+plot(model1, which = 1)
+AIC(model1)
+```
+
+```{r}
+# R2 = 0.68
+model2 = lm(Item_Outlet_Sales3 ~ Item_MRP + Outlet_Type)
+summary(model2)
+AIC(model2)
+plot(model2, which = 1)
+# Interacation R2 = 0.69
+model2b = lm(Item_Outlet_Sales3 ~ (Item_MRP + Outlet_Type)^2)
+summary(model2b)
+plot(model2, which = 1)
+AIC(model2b)
+formula(model2)
+#cbind(summary(model2)$coefficients[,2],summary(model3)$coefficients[,2])
+```
+
+```{r}
+# about same as model 2, no interaction R2 = 0.68
+model3 = lm(Item_Outlet_Sales3 ~ Item_MRP + Outlet_Identifier)
+summary(model3)
+AIC(model3)
+# interaction R2 = 0.69
+model3b = lm(Item_Outlet_Sales3 ~ (Item_MRP + Outlet_Identifier)^2)
+summary(model3b)
+AIC(model3b)
+```
+
+
+```{r}
+# Some not very important models go here.
+summary(model_iden <- lm(Item_Outlet_Sales3 ~ Outlet_Identifier + Outlet_Size))
+
+summary(model_spmkt <- lm(Item_Outlet_Sales3 ~ Outlet_Type))
+
+summary(model_size <- lm(Item_Outlet_Sales3 ~ Outlet_Size))
+
+summary(model_fat <- lm(Item_Outlet_Sales3 ~ Item_Fat_Content))
+
+summary(model_loc <- lm(Item_Outlet_Sales3 ~  Outlet_Location_Type))
+
+summary(model_vis <- lm(Item_Outlet_Sales3 ~ Item_Visibility))
+
+summary(model_cat2 <- lm(Item_Outlet_Sales3 ~ Item_Cat2))
+
+summary(model_big <- lm(Item_Outlet_Sales3 ~ (Item_MRP + Outlet_Identifier + Item_Visibility)^2 ))
+```
+
+
+
+
+```{r}
+# creating a clean dataset
+mydatac = mydata %>%
+  ungroup() %>%
+  dplyr::select(Item_Weight:Outlet_Identifier, Outlet_Location_Type:Outlet_Age, Item_Outlet_Sales3, -Item_Outlet_Sales, -Item_Type)
+```
+
+```{r}
+# Here is a model with all main efects
+modelfull = lm(Item_Outlet_Sales3 ~ ., data = mydatac)
+summary(modelfull)
+AIC(modelfull)
+
+plot(modelfull, which = 1)
+#barplot(modelfull$coefficients)
+```
+
+```{r}
+# Here we use a stepwise procedure to perform model selection.
+# We start with a model with all the main effects and specify the 
+# intercept-only model(Model0) as a lower-limit model, 
+# and a full model including all two-way interactions 
+# of all possible predictor variables as the upper limit.
+modelstep = step(modelfull, scope = list(lower="~1", upper = "~.^2"), direction = "both", trace = F)
+AIC(modelstep)
+summary(modelstep)
+plot(modelstep, which = 1)
+barplot(modelstep$coefficients)
+modelstep$terms[[3]]
+
+kable(summary(modelstep)$coeff)
+```
+
+
+```{r}
+nsims= 2000
+n = nrow(mydata)
+betas_1=rep(NA,nsims)
+for(i in 1:nsims){
+  reorder=sample(1:n,size=n,replace=TRUE)
+  newY=modelstep$fitted.values+modelstep$residuals[reorder]
+  lm_boot=lm(newY~ Item_MRP + Outlet_Identifier + Item_MRP*Outlet_Identifier)
+  betas_1[i]=summary(lm_boot)$coefficients[2]
+}
+print(ci_boot1<-quantile(betas_1,c(0.025, 0.975)))
+hist(betas_1,col="gray")
+abline(v=ci_boot1,col="red",lwd=3)
+
+```
+
+
+```{r}
+##########
+# Permutation Tests
+##########
+set.seed(12345)
+n=50
+# x1=rnorm(n)
+# x2=rnorm(n,mean=0.5*x1,sd=sqrt(0.75))
+# b0 = 2
+# b1 = 1   
+# b2 = 0.5
+# y=b0+b1*x1+b2*x2+rexp(n)-1
+# summary(lm1<-lm(y~x1+x2))
+# simdata=as.data.frame(cbind(y,x1,x2))
+
+
+# For testing model, overall (F-test)
+nsims=1000
+betas_perm = matrix(NA,nrow=nsims,ncol=length(coef(modelstep)))
+F_perm = rep(NA,nsims)
+for(i in 1:nsims){
+  lm_perm = lm(sample(Item_Outlet_Sales3,replace=T)~Item_MRP + Outlet_Identifier + Item_MRP*Outlet_Identifier,data=mydatac)
+  betas_perm[i,] = coef(lm_perm)
+  F_perm[i] = summary(lm_perm)$fstatistic[1]
+}
+quantile(F_perm,c(0.99))
+qf(0.95,2,47)
+for(i in 1:20){
+  hist(betas_perm[,i], col = "pink")
+}
+
+
+
+hist(betas_perm[,1],col="gray")
+hist(F_perm, col = "pink", main = "Histogram of F-test, for testing modelstep overall")
+
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+require(glmnet)
+require(MASS)
+
+
+# implementing cv with model2, modelstep, and ridge/lasso
+set.seed(420)
+nsims = 1000
+n = nrow(mydata)
+
+sse2= ssestep = rep(NA, nsims)
+
+lambdas = c(seq(0.0001,.01,len=6),seq(0.1, 1.9,len=10) ,seq(2,10,len=6))
+
+sse_ridge= sse_lasso=sse_el2=sse_el4=sse_el6=sse_el8= matrix(NA,nrow=nsims,ncol=length(lambdas))
+X = model.matrix(modelstep)
+y = mydatac$Item_Outlet_Sales3
+
+for(i in 1:nsims){
+  #initialize randomness
+  reorder = sample(n)
+  train = mydatac[reorder[1:6500],]
+  test = mydatac[reorder[6500:n],]
+  #initialize models
+  fit2 = lm(formula(model2), data = train)
+  fitstep = lm(formula(modelstep), data = train)
+  
+  #measure sse
+  sse2[i] = sum((test$Item_Outlet_Sales3 - predict(fit2, new = test))^2)
+  ssestep[i] = sum((test$Item_Outlet_Sales3 - predict(fitstep, new = test))^2)
+  
+  X_train=X[reorder[1:6500],]
+  y_train=y[reorder[1:6500]]
+  X_test=X[reorder[6500:n],]
+  y_test=y[reorder[6500:n]]
+  
+  ridges = glmnet(X_train,y_train, alpha = 0, lambda = lambdas)
+  el2 =glmnet(X_train,y_train, alpha = 0.2, lambda = lambdas) 
+  el4 =glmnet(X_train,y_train, alpha = 0.4, lambda = lambdas) 
+  el6 =glmnet(X_train,y_train, alpha = 0.6, lambda = lambdas) 
+  el8 =glmnet(X_train,y_train, alpha = 0.8, lambda = lambdas) 
+  lassos = glmnet(X_train,y_train, alpha = 1, lambda = lambdas)
+  
+  #calculate yhats for test set to get SSEs in test set
+  yhat_test_ridges = predict(ridges,newx=X_test)
+  yhat_test_el2 = predict(el2,newx=X_test)
+  yhat_test_el4 = predict(el4,newx=X_test)
+  yhat_test_el6 = predict(el6,newx=X_test)
+  yhat_test_el8 = predict(el8,newx=X_test)
+  yhat_test_lassos = predict(lassos,newx=X_test)
+  
+  
+  sse_ridge[i,]=apply((y_test-yhat_test_ridges)^2,2,sum)
+  sse_el2[i,]=apply((y_test-yhat_test_el2)^2,2,sum)
+  sse_el4[i,]=apply((y_test-yhat_test_el4)^2,2,sum)
+  sse_el6[i,]=apply((y_test-yhat_test_el6)^2,2,sum)
+  sse_el8[i,]=apply((y_test-yhat_test_el8)^2,2,sum)
+  sse_lasso[i,]=apply((y_test-yhat_test_lassos)^2,2,sum)
+}
+c(mean(sse2),mean(ssestep))
+
+
+mean_sse_ridge = apply(sse_ridge,2,mean)
+mean_sse_el2 = apply(sse_el2,2,mean)
+mean_sse_el4 = apply(sse_el4,2,mean)
+mean_sse_el6 = apply(sse_el6,2,mean)
+mean_sse_el8 = apply(sse_el8,2,mean)
+mean_sse_lasso = apply(sse_lasso,2,mean)
+
+round(cbind(lambdas, mean_sse_ridge, mean_sse_el2, mean_sse_el4, mean_sse_el6, mean_sse_el8, mean_sse_lasso),5)
+
+
+```
+
+Conclusion:
+Note that meansse for model 2 is 8233.4 and for modelstep meansse is 7988.1 
+When we perform Ridge/Lasso regression with very high lambda range 10^6 both come close to modelstep mean see each with 7988.7 and 7989.5.
+Hence we dont get much improvement with Ridge/Lasso which goes to show that the stepwise procedure in both directions in good enough.
+
+
+```{r}
+#Ploting Lasso and Ridge mean sse in test set
+plot(mean_sse_lasso~lambdas,type="b",col="green",xlim=c(min(lambdas),max(lambdas)),ylim=c(min(mean_sse_lasso),max(mean_sse_lasso)),main="Lasso(green) vs Ridge(blue) mean SSE in test set", lwd=3)
+points(mean_sse_ridge~lambdas, col = "blue")
+lines(mean_sse_ridge~lambdas, col = "blue")
+
+```
+
+
+
+
+```{r, eval=False}
+#elastic models go here
+library(caret)
+library(glmnet)
+
+mydatanew = mydatac
+attach(mydatanew)
+
+# Load the data
+
+# Split the data into training and test set
+set.seed(123)
+training.samples <- mydatac$Item_Outlet_Sales3 %>%
+  createDataPartition(p = 0.8, list = FALSE)
+train.data  <- mydatac[training.samples, ]
+test.data <- mydatac[-training.samples, ]
+
+# Predictor variables
+x <- model.matrix(Item_Outlet_Sales3~., train.data)[,-1]
+# Outcome variable
+y <- train.data$Item_Outlet_Sales3
+
+
+# Find the best lambda using cross-validation
+set.seed(123) 
+cv <- cv.glmnet(x, y, alpha = 0)
+# Display the best lambda value
+cv$lambda.min
+
+# Fit the final model on the training data
+model <- glmnet(x, y, alpha = 0.8, lambda = cv$lambda.min)
+# Display regression coefficients
+coef(model)
+
+# Make predictions on the test data
+x.test <- model.matrix(Item_Outlet_Sales3 ~., test.data)[,-1]
+predictions <- model %>% predict(x.test) %>% as.vector()
+# Model performance metrics
+data.frame(RMSE = RMSE(predictions, test.data$Item_Outlet_Sales3), Rsquare = R2(predictions, test.data$Item_Outlet_Sales3) )
+
+
+#     RMSE   Rsquare
+#1 2.01017 0.6816559
+
+# Find the best lambda using cross-validation
+set.seed(123) 
+cv <- cv.glmnet(x, y, alpha = 1)
+# Display the best lambda value
+cv$lambda.min
+
+
+# Fit the final model on the training data
+model <- glmnet(x, y, alpha = 1, lambda = cv$lambda.min)
+# Dsiplay regression coefficients
+coef(model)
+
+
+x.test <- model.matrix(Item_Outlet_Sales3 ~., test.data)[,-1]
+predictions <- model %>% predict(x.test) %>% as.vector()
+# Model performance metrics
+data.frame(RMSE = RMSE(predictions, test.data$Item_Outlet_Sales3),Rsquare = R2(predictions, test.data$Item_Outlet_Sales3))
+#      RMSE   Rsquare
+#1 2.01017 0.6816559
+
+
+# Build the model using the training set
+set.seed(123)
+model <- train(
+  Item_Outlet_Sales3 ~., data = train.data, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+# Best tuning parameter
+model$bestTune
+
+##   alpha lambda
+## 6   0.1   0.21
+# Coefficient of the final model. You need
+# to specify the best lambda
+coef(model$finalModel, model$bestTune$lambda)
+## 14 x 1 sparse Matrix of class "dgCMatrix"
+##                     1
+## (Intercept)  33.04083
+## crim         -0.07898
+## zn            0.04136
+## indus        -0.03093
+## chas          2.34443
+## nox         -14.30442
+## rm            3.90863
+## age           .      
+## dis          -1.41783
+## rad           0.20564
+## tax          -0.00879
+## ptratio      -0.91214
+## black         0.00946
+## lstat        -0.51770
+
+# Make predictions on the test data
+x.test <- model.matrix(Item_Outlet_Sales3 ~., test.data)[,-1]
+
+
+
+
+predictions <- model %>% predict(x.test)
+# Model performance metrics
+data.frame(
+  RMSE = RMSE(predictions, test.data$medv),
+  Rsquare = R2(predictions, test.data$medv)
+)
+##   RMSE Rsquare
+## 1 4.98   0.672
+
+
+
+
+
+
+
+
+
+
+#elastic models go here
+set.seed(123)
+elastic <- train(
+  medv ~., data = train.data, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+  )
+# Model coefficients
+coef(elastic$finalModel, elastic$bestTune$lambda)
+# Make predictions
+predictions <- elastic %>% predict(test.data)
+# Model prediction performance
+data.frame(
+  RMSE = RMSE(predictions, test.data$medv),
+  Rsquare = R2(predictions, test.data$medv)
+)
+
+
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+#plotting Sales vs MRP
+ggplot(mydata, aes(Item_MRP, Item_Outlet_Sales, col = Outlet_Type))+
+  geom_point()
+```
+
+```{r}
+plot(Item_Outlet_Sales ~ Outlet_Identifier, data = mydata)
+plot(Item_Outlet_Sales ~ Item_Type, data = mydata)
+plot(Item_Outlet_Sales^{1/3} ~ Item_Fat_Content, data = mydata)
+ggplot(mydata, aes(Item_Outlet_Sales, Outlet_Location_Type))+
+  geom_point()
+```
+
+
+
+
+
+
